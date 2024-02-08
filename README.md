@@ -19,3 +19,11 @@
 
 #### 使用方法
 `python3 uniqlo.py`
+
+#### 预览效果
++ 添加商品
+![image](docs/add_product.png)
++ 商品监控
+![image](docs/monitor.png)
++ Bark推送结果
+![image](docs/bark_push.jpg)
