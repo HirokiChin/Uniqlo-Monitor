@@ -9,6 +9,19 @@ import json
 import sys
 import platform
 
+"""
+2022-07 新增查看商品监控库存，可搜索
+2022-08 管理监控商品新增修改
+        优化推送通知，新增推送商品url
+2022-10 优化运行流出
+2023-12 修复商品下架后异常退出的问题，Bark增加时效性通知，自定义通知铃声
+2024-02 搜索到多个商品时，增加选择功能；修复部分操作导致的异常报错问题
+  
+"""
+
+# TODO 低库存预警，库存低于5时将发出通知
+low_stock_warning = True
+
 
 class UniqloStockMonitor:
     def __init__(self):
@@ -23,9 +36,39 @@ class UniqloStockMonitor:
                           'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.2 Safari/605.1.15'
         })
 
+        # search_result = self.search(product_id)
+        # if not len(search_result['resp'][1])
+        #     break
+        # self.product_code = search_result['resp'][1][0]['productCode']
+
     @staticmethod
-    def get_pid(name):
-        return os.popen(f"ps -ef | grep \"{name} start\" " + "| grep -v grep | awk \'{print $2}\'").read().rstrip()
+    def get_pid(file_path):
+        return os.popen(f"ps -ef | grep \"{file_path} start\" " + "| grep -v grep | awk \'{print $2}\'").read().rstrip()
+
+    @staticmethod
+    def background_start(file_path, restart=False):
+        if restart:
+            uniqlo.stop_program(file_path)
+        os.system(f'nohup python3 {file_path} start > uniqlo_monitor.out 2>&1 &')
+        pid = uniqlo.get_pid(file_path)
+        if pid != '':
+            print(f"UniqloMonitor has been activated, PID: {pid}")
+        else:
+            exit("Start-up failure!")
+
+    @staticmethod
+    def stop_program(file_path, check_status=False):
+        pid = uniqlo.get_pid(file_path)
+        if check_status and pid:
+            print(f"UniqloMonitor has been activated, PID: {pid}")
+            return
+        if pid == '':
+            print('UniqloMonitor is not started!')
+            return
+        os.system(f"kill -9 '{pid.rstrip()}'")
+        pid = uniqlo.get_pid(args[0])
+        if pid == '':
+            print('UniqloMonitor has been killed.')
 
     @staticmethod
     def check_file(create=False, **kwargs):
@@ -60,7 +103,8 @@ class UniqloStockMonitor:
     def push_message(self, title, body):
         push_info = self.get_file_info('push')
         if push_info['type'] == 'bark':
-            return requests.get(f"https://api.day.app/{push_info['key']}/{title}/{body}").json()
+            return requests.get(f"https://api.day.app/{push_info['key']}/{title}/{body}"
+                                f"?level=timeSensitive&sound=glass").json()
 
     def get_stock(self, product_code):
         """
@@ -72,7 +116,6 @@ class UniqloStockMonitor:
             "productCode": product_code,
             "type": "DETAIL"
         }))
-
         return res.json()['resp'][0]['expressSkuStocks']
 
         # print(json.dumps(res.json(), ensure_ascii=False, indent=4))
@@ -157,10 +200,15 @@ class UniqloStockMonitor:
         """
         search_result = self.search(product_id)
         if not len(search_result['resp'][1]):
-            print("未找到商品，或该商品已下架！")
-            return
+            exit("未找到商品，或该商品已下架！")
 
-        product_code_4_start = search_result['resp'][1][0]['code']  # 4开头的6位code码
+        print(f"共找到{len(search_result['resp'][1])}个商品:")
+        for index, result in enumerate(search_result['resp'][1]):
+            print(f"  {index + 1}、{result['name4zhCN']} 价格: {result['maxVaryPrice']}")
+
+        choice = int(input("请选择商品: "))
+
+        product_code_4_start = search_result['resp'][1][choice-1]['code']  # 4开头的6位code码
         stock, product_info_rows, product_info = dict(), list(), dict()
         for result in search_result['resp'][1]:
             # 聚合搜索
@@ -170,11 +218,6 @@ class UniqloStockMonitor:
                 stock = {**stock, **self.get_stock(product_code)}
                 product_info = self.get_product_info(result['productCode'])
                 product_info_rows.append(product_info['rows'])
-        print(f"{product_info['name']} {product_info['gDeptValue']} 原价: {product_info['originPrice']}")
-        # zhCH
-        # print(f"{search_result['resp'][1][0]['name4zhCN']} {search_result['resp'][1][0]['gender4zhCN']} "
-        #       f"原价: {search_result['resp'][1][0]['originPrice']}")
-        # print(json.dumps(product_info_rows, ensure_ascii=False, indent=4))
         # 商品数据整理
         rows = dict()
         for row in product_info_rows:
@@ -190,20 +233,18 @@ class UniqloStockMonitor:
                     "price": info['price']
                 })
         # 查看
-        # print(json.dumps(info, ensure_ascii=False, indent=4))
         if view_mode:
             for index, size in enumerate(rows):
                 print(f"{size}")
                 data_by_size = rows[list(rows.keys())[index]]
-                for index, info in enumerate(data_by_size):
-                    # print(info)
-                    print(
-                        f"  {info['style']} 现价:{info['price']} 库存:{stock[info['productId']]}")
+                for info in data_by_size:
+                    print(f"  {info['style']} 现价:{info['price']} 库存:{stock[info['productId']]}")
             print()
             return
-
+        print(f"{product_info['name']} {product_info['gDeptValue']} 原价: {product_info['originPrice']} "
+              f"现价: {product_info['rows'][0]['price']}")
         for index, size in enumerate(rows):
-            print(f"{index + 1}、{size}")
+            print(f"  {index + 1}、{size}")
 
         choice = input("请选择码数: ")
         choice_size = list(rows.keys())[int(choice) - 1]
@@ -214,7 +255,6 @@ class UniqloStockMonitor:
             vary_price.append(info['varyPrice'])
             print(f"{index + 1}、{choice_size} {info['style']} 现价:{info['price']} 库存:{stock[info['productId']]}")
         choice = input("请选择颜色: ")
-
         goods_code = data_by_size[int(choice) - 1]['productId']
         choice_type = f"{choice_size} {data_by_size[int(choice) - 1]['style']}"
         print(f"已选择{choice_type}")
@@ -269,40 +309,41 @@ class UniqloStockMonitor:
             monitor_recorde.write(write_data)
             monitor_recorde.close()
 
-    def add_monitor_product(self):
-
+    def add_monitor_product(self, code=None):
         if not self.check_file():
             self.check_file(True, type='bark', key=input('请输入bark的设备码: '))
 
-        code = input("请输入商品货号(4开头的6位数字)：")
-        goods_code, product_info, vary_price, choice_type = self.get_goods_code(code)
-        if goods_code is not None:
-            target_price = input("设置降价目标价(当前价格小于或等于此价格时触发提醒，回车跳过): ")
-            file_data = self.get_file_info('all')
-            recorde_history = file_data['products']
-            recorde_history[goods_code] = {
-                "name": product_info['name'],
-                "type": choice_type,
-                "originPrice": product_info['originPrice'],
-                "varyPrice": vary_price,
-                "targetPrice": target_price,
-                "code": product_info['code']
-            }
-            monitor_recorde = open('monitor_config.json', 'w+')
+        try:
+            if code is None:
+                code = input("请输入商品货号(4开头的6位数字)：")
+            goods_code, product_info, vary_price, choice_type = self.get_goods_code(code)
+            if goods_code is not None:
+                target_price = input("设置降价目标价(当前价格小于或等于此价格时触发提醒，回车跳过): ")
+                file_data = self.get_file_info('all')
+                recorde_history = file_data['products']
+                recorde_history[goods_code] = {
+                    "name": product_info['name'],
+                    "type": choice_type,
+                    "originPrice": product_info['originPrice'],
+                    "varyPrice": vary_price,
+                    "targetPrice": target_price,
+                    "code": product_info['code']
+                }
+                monitor_recorde = open('monitor_config.json', 'w+')
 
-            write_data = json.dumps({
-                "products": recorde_history,
-                "push": file_data['push']
-            }, ensure_ascii=False, indent=4)
+                write_data = json.dumps({
+                    "products": recorde_history,
+                    "push": file_data['push']
+                }, ensure_ascii=False, indent=4)
 
-            monitor_recorde.write(write_data)
-            monitor_recorde.close()
-
-            print("写入成功！")
+                monitor_recorde.write(write_data)
+                monitor_recorde.close()
+                print("写入成功！")
+        except KeyboardInterrupt:
+            exit('\nUser manual interrupt!')
 
     def main(self):
         while True:
-            # self.get_goods_code(product_id)
             choice = input("1、查找商品并查看商品库存\n"
                            "2、查找并添加需要监控的商品\n"
                            "3、查看并管理监控的商品\n"
@@ -348,15 +389,14 @@ class UniqloStockMonitor:
                            f"&url=https://www.uniqlo.cn/product-detail.html?" \
                            f"productCode={choice_product_info['productId'][:-3]}&productId={choice_product_info['productId']}"
             # 降价
-            if depreciate_warning and stocks:
+            if depreciate_warning and stocks >= 1:
                 if float(target_price) >= float(vary_price):
                     print(f"【{choice_product_info['style']} | {choice_product_info['size']}】{product_info['name']} ",
                           end='')
                     print(f"当前库存: {stocks}")
                     print(f"当前价格: {vary_price}")
                     self.push_message('优衣库降价库存监控', push_message)
-
-            elif stocks:
+            elif stocks >= 1:
                 print(f"【{choice_product_info['style']} | {choice_product_info['size']}】{product_info['name']} ",
                       end='')
                 print(f"当前库存: {stocks}")
@@ -373,8 +413,12 @@ class UniqloStockMonitor:
         print('已选择:')
         for index, goods_code in enumerate(recorde_history):
             product_id = goods_code[:-3]
-
-            stocks = self.get_stock(product_id)[goods_code]
+            try:
+                stocks = self.get_stock(product_id)[goods_code]
+            except KeyError:
+                print(f"【{recorde_history[goods_code]['type']}】{recorde_history[goods_code]['name']} "
+                      f"{recorde_history[goods_code]['code']} 已下架！")
+                continue
             product_info = self.get_product_info(product_id)
 
             choice_product_info = [i for i in product_info['rows'] if i['productId'] == goods_code][0]
@@ -393,7 +437,7 @@ class UniqloStockMonitor:
                 print('--------------------------------------------')
 
         print('-----------------开始监控库存-----------------')
-        self.push_message('优衣库监控已启动', '')
+        self.push_message('优衣库监控已启动', '?group=Uniqlo&icon=https://www.uniqlo.cn/public/Image/L1/nav/nav-logo/LOGO.gif')
         while True:
             print(time.strftime("%m-%d %H:%M:%S", time.localtime()))
             hour = time.strftime('%H', time.localtime())
@@ -425,8 +469,10 @@ if __name__ == '__main__':
         \tconfig: Add products to be monitored
         \tmodify: Edit config file and notification
         \tstart:  Start to monitor
-        \tostart: One-click start, support Linux
+        \tbstart: Running programs in the background, support Linux, Unix
+        \trestart: Restart the program in the background
         \tstop:   Stop the one-click start process
+        \tstatus: Get running status 
         """)
         exit(1)
 
@@ -437,32 +483,34 @@ if __name__ == '__main__':
             uniqlo.get_goods_code(input("请输入商品货号(4开头的6位数字)："), view_mode=True)
 
     elif args[1] == "config":
-        uniqlo.add_monitor_product()
+        if len(args) > 2:
+            uniqlo.add_monitor_product(args[2])
+        else:
+            uniqlo.add_monitor_product()
+        uniqlo.background_start(args[0], restart=True)
 
     elif args[1] == "modify":
         uniqlo.manage_product()
+        uniqlo.background_start(args[0], restart=True)
 
     elif args[1] == "start":
         uniqlo.monitor()
 
-    elif args[1] == 'ostart':
+    elif args[1] == 'bstart':
         if platform.system() not in ['Linux', 'Darwin']:
-            exit(f'Linux/Darwin only, your system version is {platform.system()}')
+            exit(f'Linux/Unix only, your system version is {platform.system()}')
+        uniqlo.background_start(file_path=args[0])
 
-        os.system(f'nohup python3 {args[0]} start > nohup.out 2>&1 &')
-        pid = uniqlo.get_pid(args[0])
-        if pid != '':
-            print(f"监控已启动, PID: {pid}")
+    elif args[1] == 'restart':
+        if platform.system() not in ['Linux', 'Darwin']:
+            exit(f'Linux/Unix only, your system version is {platform.system()}')
+        uniqlo.background_start(file_path=args[0], restart=True)
 
     elif args[1] == 'stop':
-        pid = uniqlo.get_pid(args[0])
-        if pid == '':
-            exit('监控未启动！')
-        os.system(f"kill -9 '{pid.rstrip()}'")
-        pid = uniqlo.get_pid(args[0])
+        uniqlo.stop_program(args[0])
 
-        if pid == '':
-            print('已结束进程！')
+    elif args[1] == 'status':
+        uniqlo.stop_program(args[0], check_status=True)
+
     else:
         exit('Nothing to do.')
-
